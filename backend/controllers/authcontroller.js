@@ -1,8 +1,11 @@
+// controllers/authController.js
 const Users = require("../models/users");
 const bcrypt = require("bcrypt");
 const nodemailer = require("nodemailer");
+const { v4: uuidv4 } = require("uuid");
+const jwt = require("jsonwebtoken");
 
-const otpStore = {};
+const otpStore = {}; // { [sessionId]: { email, code, expiresAt, tries, remember } }
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -23,91 +26,156 @@ const sendOtpEmail = async (email, code) => {
 
 const register = async (req, res) => {
   const { username, email, password } = req.body;
-
-  if (!username || !email || !password)
+  if (!username || !email || !password) {
     return res.status(400).json({ message: "Champs requis manquants" });
-
-  try {
-    const usernameTaken = await Users.findOne({ where: { username } });
-    if (usernameTaken)
-      return res
-        .status(409)
-        .json({ message: "Nom d'utilisateur déjà utilisé" });
-
-    const emailTaken = await Users.findOne({ where: { email } });
-    if (emailTaken)
-      return res.status(409).json({ message: "Email déjà utilisé" });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = await Users.create({
-      username,
-      email,
-      password_hash: hashedPassword,
-    }); 
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    otpStore[email] = { code: otp, expiresAt };
-
-    await sendOtpEmail(email, otp);
-
-    res.status(201).json({ message: "Code de vérification envoyé par email" });
-  } catch (err) {
-    console.log(err);
-    res.status(500).json({ message: "Erreur serveur", error: err.message });
   }
+
+  if (await Users.findOne({ where: { username } })) {
+    return res.status(409).json({ message: "Nom d'utilisateur déjà utilisé" });
+  }
+  if (await Users.findOne({ where: { email } })) {
+    return res.status(409).json({ message: "Email déjà utilisé" });
+  }
+
+  const password_hash = await bcrypt.hash(password, 10);
+  const sessionId = uuidv4();
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+  otpStore[sessionId] = {
+    pendingUser: { username, email, password_hash },
+    code,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    tries: 0,
+    remember: false,
+  };
+
+  await sendOtpEmail(email, code);
+  res.status(201).json({ sessionId });
 };
 
-const login = async (req, res) => {
-  const { username, password } = req.body;
-
-  try {
-    const user = await Users.findOne({ where: { username } });
-    if (!user)
-      return res.status(401).json({ message: "Utilisateur non trouvé" });
-
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword)
-      return res.status(401).json({ message: "Mot de passe incorrect" });
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    otpStore[user.email] = { code: otp, expiresAt };
-
-    await sendOtpEmail(user.email, otp);
-
-    res.status(200).json({ message: "Code de vérification envoyé par email" });
-  } catch (err) {
-    console.error("Erreur pendant la connexion :", err);
-    res.status(500).json({ message: "Erreur serveur", error: err.message });
+const verifyRegisterOtp = async (req, res) => {
+  const { sessionId, code } = req.body;
+  const entry = otpStore[sessionId];
+  if (!entry) {
+    return res.status(400).json({ message: "Session invalide" });
   }
-};
-
-const verifyOtp = (req, res) => {
-  const { email, code } = req.body;
-  const entry = otpStore[email];
-
-  if (!entry) return res.status(400).json({ message: "Aucun code actif" });
 
   if (Date.now() > entry.expiresAt) {
-    delete otpStore[email];
+    delete otpStore[sessionId];
     return res.status(401).json({ message: "Code expiré" });
   }
 
-  entry.tries = (entry.tries || 0) + 1;
-
+  entry.tries++;
   if (entry.tries > 3) {
-    delete otpStore[email];
-    return res.status(403).json({ message: "Trop de tentatives. Veuillez vous reconnecter." });
+    delete otpStore[sessionId];
+    return res.status(403).json({ message: "Trop de tentatives" });
   }
 
-  if (code !== entry.code) {
+  if (entry.code !== code) {
     return res.status(401).json({ message: "Code invalide" });
   }
 
-  delete otpStore[email];
-  return res.json({ message: "✅ Code vérifié. Authentification réussie !" });
+  const { username, email, password_hash } = entry.pendingUser;
+  await Users.create({ username, email, password_hash });
+
+  delete otpStore[sessionId];
+  res.json({ message: "Inscription confirmée" });
 };
 
-module.exports = { register, login, verifyOtp };
+const login = async (req, res) => {
+  const { username, password, remember = false } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ message: "Champs requis manquants" });
+  }
+
+  const user = await Users.findOne({ where: { username } });
+  if (!user) {
+    return res.status(401).json({ message: "Utilisateur non trouvé" });
+  }
+  if (user.blacklisted) {
+    return res
+      .status(403)
+      .json({ message: "Compte bloqué après trop de tentatives" });
+  }
+
+  const valid = await bcrypt.compare(password, user.password_hash);
+  if (!valid) {
+    return res.status(401).json({ message: "Mot de passe incorrect" });
+  }
+
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const sessionId = uuidv4();
+  otpStore[sessionId] = {
+    email: user.email,
+    code,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    tries: 0,
+    remember,
+  };
+
+  await sendOtpEmail(user.email, code);
+  res.status(200).json({ sessionId });
+};
+
+const verifyOtp = async (req, res) => {
+  const { sessionId, code } = req.body;
+  const entry = otpStore[sessionId];
+  if (!entry) {
+    return res.status(400).json({ message: "Session invalide" });
+  }
+
+  if (Date.now() > entry.expiresAt) {
+    delete otpStore[sessionId];
+    return res.status(401).json({ message: "Code expiré" });
+  }
+
+  entry.tries++;
+  if (entry.tries > 3) {
+    delete otpStore[sessionId];
+    await Users.update(
+      { blacklisted: true },
+      { where: { email: entry.email } }
+    );
+    return res
+      .status(403)
+      .json({ message: "Trop de tentatives. Compte bloqué." });
+  }
+
+  if (entry.code !== code) {
+    return res.status(401).json({ message: "Code invalide" });
+  }
+
+  delete otpStore[sessionId];
+  const user = await Users.findOne({ where: { email: entry.email } });
+  const token = jwt.sign(
+    { userId: user.id, username: user.username },
+    process.env.JWT_SECRET,
+    { expiresIn: "1h" }
+  );
+
+  const oneHour = 3600 * 1000;
+  const oneWeek = 7 * 24 * oneHour;
+  const expiresInMs = entry.remember ? oneWeek : oneHour;
+  const tokenExpiration = Date.now() + expiresInMs;
+
+  res
+    .cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: expiresInMs,
+    })
+    .status(200)
+    .json({
+      message: "✅ Authentification réussie !",
+      username: user.username,
+      tokenExpiration,
+    });
+};
+
+module.exports = {
+  register,
+  verifyRegisterOtp,
+  login,
+  verifyOtp,
+};

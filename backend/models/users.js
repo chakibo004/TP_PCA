@@ -1,6 +1,6 @@
 const { DataTypes } = require("sequelize");
-
 const sequelize = require("../config/database");
+
 const Users = sequelize.define("Users", {
   username: {
     type: DataTypes.STRING,
@@ -15,6 +15,11 @@ const Users = sequelize.define("Users", {
   password_hash: {
     type: DataTypes.TEXT,
     allowNull: false,
+  },
+  blacklisted: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
   },
 });
 

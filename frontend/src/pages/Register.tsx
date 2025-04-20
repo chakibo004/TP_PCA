@@ -1,115 +1,176 @@
-// 3. Register.tsx avec OTP
 import React, { useState } from "react";
-import { useDispatch } from "react-redux";
-import { setUser } from "../redux/authSlice";
+import { useNavigate } from "@tanstack/react-router";
 import {
   useRegisterUserMutation,
   useVerifyOtpMutation,
 } from "../redux/apiSlice";
-import { useNavigate } from "@tanstack/react-router";
+import AlertService from "../utils/AlertService";
+import OtpInput from "../components/OtpInput";
 
-const Register = () => {
-  const dispatch = useDispatch();
+const MAX_OTP_ATTEMPTS = 3;
+
+const Register: React.FC = () => {
   const navigate = useNavigate();
-  const [form, setForm] = useState({ username: "", email: "", password: "" });
-  const [otp, setOtp] = useState("");
-  const [step, setStep] = useState<"register" | "verify">("register");
-  const [message, setMessage] = useState("");
 
-  const [registerUser] = useRegisterUserMutation();
-  const [verifyOtp] = useVerifyOtpMutation();
+  const [step, setStep] = useState<"register" | "verify">("register");
+  const [form, setForm] = useState({
+    username: "",
+    email: "",
+    password: "",
+  });
+  const [sessionId, setSessionId] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpAttempts, setOtpAttempts] = useState(0);
+
+  const [registerUser, { isLoading: isRegistering }] =
+    useRegisterUserMutation();
+  const [verifyOtp, { isLoading: isVerifying }] = useVerifyOtpMutation();
+
+  const resetForm = () => {
+    setStep("register");
+    setForm({ username: "", email: "", password: "" });
+    setSessionId("");
+    setOtp("");
+    setOtpAttempts(0);
+  };
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await registerUser(form).unwrap();
-      if (res.message.includes("Code")) {
-        setStep("verify");
-        setMessage("Un code vous a été envoyé par email.");
-      } else {
-        setMessage(res.message);
-      }
+      const { sessionId: sid } = await registerUser(form).unwrap();
+      setSessionId(sid);
+      setStep("verify");
+      setOtpAttempts(0);
+      AlertService.success("OTP envoyé", "Vérifie ta boîte mail.");
     } catch (err: any) {
-      setMessage(err?.data?.message || "Erreur lors de l'inscription");
+      AlertService.error(
+        "Erreur inscription",
+        err?.data?.message || "Impossible de s'inscrire."
+      );
     }
   };
 
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await verifyOtp({ email: form.email, code: otp }).unwrap();
-      if (res.message.includes("succ")) {
-        dispatch(setUser({ username: form.username }));
-        navigate({ to: "/home" });
-      } else {
-        setMessage(res.message);
-      }
+      await verifyOtp({ sessionId, code: otp, flow: 1 }).unwrap();
+      const msg = encodeURIComponent("Inscription réussie !");
+      navigate({ to: `/login?success=${msg}` });
     } catch (err: any) {
-      setMessage(err?.data?.message || "Erreur lors de la vérification");
+      const status = err?.status;
+      if (status === 403) {
+        AlertService.error(
+          "Trop de tentatives",
+          "Inscription annulée. Recommence plus tard."
+        );
+        resetForm();
+        window.location.href = "/register";
+        return;
+      }
+      setOtpAttempts((prev) => prev + 1);
+      const remaining = MAX_OTP_ATTEMPTS - (otpAttempts + 1);
+      const errMsg = err?.data?.message || "Code invalide";
+      AlertService.error(
+        "Erreur OTP",
+        remaining > 0
+          ? `${errMsg} Il te reste ${remaining} essai(s).`
+          : `${errMsg} Inscription annulée.`
+      );
     }
   };
 
   return (
-    <div className="flex items-center justify-center h-screen bg-gray-100">
-      <form
-        onSubmit={step === "register" ? handleRegister : handleVerify}
-        className="bg-white p-6 rounded shadow-md w-80 space-y-4"
-      >
-        <h2 className="text-xl font-semibold text-center">
-          {step === "register" ? "Inscription" : "Vérification du code"}
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-green-800 to-teal-600 p-4">
+      <div className="max-w-md w-full bg-white bg-opacity-90 backdrop-filter backdrop-blur-lg rounded-2xl shadow-2xl p-8 space-y-6">
+        <h2 className="text-3xl font-extrabold text-center text-teal-700">
+          {step === "register" ? "Créer un compte" : "Vérification OTP"}
         </h2>
 
-        {step === "register" ? (
-          <>
-            <input
-              type="text"
-              placeholder="Nom d'utilisateur"
-              value={form.username}
-              onChange={(e) => setForm({ ...form, username: e.target.value })}
-              className="w-full border px-3 py-2 rounded"
-            />
-            <input
-              type="email"
-              placeholder="Email"
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-              className="w-full border px-3 py-2 rounded"
-            />
-            <input
-              type="password"
-              placeholder="Mot de passe"
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-              className="w-full border px-3 py-2 rounded"
-            />
-          </>
-        ) : (
-          <input
-            type="text"
-            placeholder="Code OTP reçu par email"
-            value={otp}
-            onChange={(e) => setOtp(e.target.value)}
-            className="w-full border px-3 py-2 rounded"
-          />
-        )}
+        <form
+          onSubmit={step === "register" ? handleRegister : handleVerify}
+          className="space-y-4"
+        >
+          {step === "register" ? (
+            <>
+              <div>
+                <label className="block text-gray-700 mb-1">
+                  Nom d’utilisateur
+                </label>
+                <input
+                  type="text"
+                  placeholder="login"
+                  value={form.username}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, username: e.target.value }))
+                  }
+                  className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-teal-500"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  placeholder="votre@mail.com"
+                  value={form.email}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, email: e.target.value }))
+                  }
+                  className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-teal-500"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-gray-700 mb-1">Mot de passe</label>
+                <input
+                  type="password"
+                  placeholder="••••••••"
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, password: e.target.value }))
+                  }
+                  className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-teal-500"
+                  required
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <OtpInput value={otp} onChange={setOtp} disabled={isVerifying} />
+              <p className="text-sm text-gray-600 text-center">
+                Essai {otpAttempts} / {MAX_OTP_ATTEMPTS}
+              </p>
+            </>
+          )}
 
-        {message && (
-          <p className="text-red-500 text-sm text-center">{message}</p>
-        )}
-
-        <button className="w-full bg-green-600 text-white py-2 rounded hover:bg-green-700">
-          {step === "register" ? "S'inscrire" : "Valider le code"}
-        </button>
+          <button
+            type="submit"
+            disabled={isRegistering || isVerifying}
+            className={`w-full py-3 rounded-lg text-white font-semibold transition-colors ${
+              isRegistering || isVerifying
+                ? "bg-gray-400 cursor-not-allowed"
+                : "bg-teal-600 hover:bg-teal-700"
+            }`}
+          >
+            {step === "register"
+              ? isRegistering
+                ? "Inscription…"
+                : "S'inscrire"
+              : isVerifying
+                ? "Vérification…"
+                : "Valider le code"}
+          </button>
+        </form>
 
         {step === "register" && (
           <p
-            className="text-sm text-center text-blue-600 cursor-pointer hover:underline"
+            className="text-center text-sm text-teal-600 hover:text-teal-800 cursor-pointer"
             onClick={() => navigate({ to: "/login" })}
           >
-            Déjà inscrit ? Se connecter
+            Déjà inscrit ? Se connecter
           </p>
         )}
-      </form>
+      </div>
     </div>
   );
 };
