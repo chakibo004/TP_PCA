@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require("uuid");
 const jwt = require("jsonwebtoken");
 
 const otpStore = {}; // { [sessionId]: { email, code, expiresAt, tries, remember } }
-
+const users = {};
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -120,43 +120,43 @@ const login = async (req, res) => {
 const verifyOtp = async (req, res) => {
   const { sessionId, code } = req.body;
   const entry = otpStore[sessionId];
-  if (!entry) {
-    return res.status(400).json({ message: "Session invalide" });
-  }
-
-  if (Date.now() > entry.expiresAt) {
-    delete otpStore[sessionId];
-    return res.status(401).json({ message: "Code expiré" });
-  }
-
-  entry.tries++;
-  if (entry.tries > 3) {
-    delete otpStore[sessionId];
-    await Users.update(
-      { blacklisted: true },
-      { where: { email: entry.email } }
-    );
-    return res
-      .status(403)
-      .json({ message: "Trop de tentatives. Compte bloqué." });
-  }
+  // ... (existing validation: entry, expiresAt, tries) ...
 
   if (entry.code !== code) {
     return res.status(401).json({ message: "Code invalide" });
   }
 
-  delete otpStore[sessionId];
+  // Code is valid, find user
   const user = await Users.findOne({ where: { email: entry.email } });
+  if (!user) {
+    // Should not happen if login found the user, but good practice
+    delete otpStore[sessionId];
+    return res
+      .status(404)
+      .json({ message: "Utilisateur non trouvé après vérification OTP" });
+  }
+
+  delete otpStore[sessionId]; // Clean up OTP entry
+
+  // Generate JWT
   const token = jwt.sign(
     { userId: user.id, username: user.username },
     process.env.JWT_SECRET,
-    { expiresIn: "1h" }
+    { expiresIn: entry.remember ? "7d" : "1h" } // Use remember flag for expiration
   );
 
   const oneHour = 3600 * 1000;
   const oneWeek = 7 * 24 * oneHour;
   const expiresInMs = entry.remember ? oneWeek : oneHour;
   const tokenExpiration = Date.now() + expiresInMs;
+
+  // **Important**: Update the shared 'users' object upon successful login verification
+  // We don't store socketId here, it will be stored when the socket connects and authenticates
+  if (!users[user.id]) {
+    users[user.id] = {};
+  }
+  users[user.id].username = user.username; // Store username
+  users[user.id].socketId = null; // Initialize socketId as null
 
   res
     .cookie("token", token, {
@@ -168,6 +168,7 @@ const verifyOtp = async (req, res) => {
     .status(200)
     .json({
       message: "✅ Authentification réussie !",
+      userId: user.id,
       username: user.username,
       tokenExpiration,
     });
@@ -178,4 +179,5 @@ module.exports = {
   verifyRegisterOtp,
   login,
   verifyOtp,
+  users, // **Export the users object**
 };

@@ -52,17 +52,17 @@ const Login: React.FC = () => {
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const { username, tokenExpiration } = await verifyOtp({
+      const { userId, username, tokenExpiration } = await verifyOtp({
         sessionId,
         code: otp,
         flow: 0,
       }).unwrap();
-
       // Stocke la session (username + expiration)
       dispatch(
         setCredentials({
-          username: username!,
-          tokenExpiration: tokenExpiration!,
+          id: userId,
+          username,
+          tokenExpiration,
         })
       );
       AlertService.success("Connecté", "Bienvenue !");

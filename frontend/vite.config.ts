@@ -13,7 +13,7 @@ export default defineConfig({
   ],
   server: {
     host: "0.0.0.0",
-    port: 4000, // ou un autre port de ton choix
+    port: 4001, // ou un autre port de ton choix
   },
   resolve: {
     alias: {

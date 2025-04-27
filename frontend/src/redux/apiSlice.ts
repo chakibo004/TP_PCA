@@ -6,6 +6,10 @@ export interface LoginPayload {
   password: string;
   remember: boolean;
 }
+export interface User {
+  id: number;
+  username: string;
+}
 export interface RegisterPayload {
   username: string;
   email: string;
@@ -14,135 +18,127 @@ export interface RegisterPayload {
 export interface VerifyOtpPayload {
   sessionId: string;
   code: string;
-  flow: 0 | 1;
+  flow: 0 | 1; // 0 = login, 1 = register
 }
-export interface KeySessionPayload {
+export interface DhPeerInitPayload {
+  p: string;
+  g: string;
+  Apub: string;
   targetId: string;
+}
+export interface DhPeerRespondPayload {
+  sessionId: string;
+  Bpub: string;
 }
 export interface MessagePayload {
   sessionId: string;
   ciphertext: string;
 }
+interface DhRespParams {
+  p: string;
+  g: string;
+  Apub: string;
+  Bpub?: string;
+}
 
 export const apiSlice = createApi({
   reducerPath: "api",
   baseQuery: fetchBaseQuery({
-    baseUrl: "http://localhost:4000/auth",
+    baseUrl: "http://localhost:4000",
     credentials: "include",
   }),
-  endpoints: (builder) => ({
+  endpoints: (b) => ({
     // --- Auth classique ---
-    loginUser: builder.mutation<{ sessionId: string }, LoginPayload>({
-      query: (body) => ({
-        url: "/login",
-        method: "POST",
-        body,
-      }),
+    loginUser: b.mutation<{ sessionId: string }, LoginPayload>({
+      query: (body) => ({ url: "/auth/login", method: "POST", body }),
     }),
-    registerUser: builder.mutation<{ sessionId: string }, RegisterPayload>({
-      query: (body) => ({
-        url: "/register",
-        method: "POST",
-        body,
-      }),
+    registerUser: b.mutation<{ sessionId: string }, RegisterPayload>({
+      query: (body) => ({ url: "/auth/register", method: "POST", body }),
     }),
-    verifyOtp: builder.mutation<
-      { message: string; username?: string; tokenExpiration?: number },
+    verifyOtp: b.mutation<
+      {
+        message: string;
+        userId: number;
+        username: string;
+        tokenExpiration: number;
+      },
       VerifyOtpPayload
     >({
       query: ({ sessionId, code, flow }) => ({
-        url: flow === 1 ? "/verifyRegisterOtp" : "/verifyOtp",
+        url: flow === 1 ? "/auth/verifyRegisterOtp" : "/auth/verifyOtp",
         method: "POST",
         body: { sessionId, code },
       }),
     }),
 
-    // --- Distribution de clés (cas 1 & 2) ---
-    case1Initiate: builder.mutation<{ sessionId: string }, KeySessionPayload>({
-      query: (body) => ({
-        url: "/key/case1/initiate",
-        method: "POST",
-        body,
-      }),
-    }),
-    case1Fetch: builder.query<{ keyHex: string }, string>({
-      query: (sessionId) => `/key/case1/fetch/${sessionId}`,
-    }),
-    case2Generate: builder.mutation<{ sessionId: string }, void>({
-      query: () => ({
-        url: "/key/case2/generate",
-        method: "POST",
-      }),
-    }),
-    case2Fetch: builder.query<{ keyHex: string }, string>({
-      query: (sessionId) => `/key/case2/fetch/${sessionId}`,
+    // --- Liste des utilisateurs (contacts) ---
+    getUsers: b.query<User[], void>({
+      query: () => "/users",
     }),
 
-    // --- Auth mutuelle par clés symétriques ---
-    startKeyAuth: builder.mutation<
-      { authSessionId: string; Na: string },
-      { keySessionId: string; targetId: string }
+    // --- Diffie–Hellman peer‑to‑peer (A ↔ B) ---
+    getDhPeerParams: b.query<{ p: string; g: string }, void>({
+      query: () => "/dh/peer/params",
+    }),
+    getDhPeerParamsForResponse: b.query<
+      { p: string; g: string; Apub: string; Bpub?: string },
+      string
     >({
+      query: (sid) => `/dh/peer/params/response/${sid}`,
+    }),
+    getPeerSession: b.query<{ initiator: number; target: number }, string>({
+      query: (sid) => `/dh/peer/session/${sid}`,
+    }),
+    initiatePeer: b.mutation<{ sessionId: string }, DhPeerInitPayload>({
       query: (body) => ({
-        url: "/mutual/keyAuth/start",
+        url: "/dh/peer/initiate",
         method: "POST",
         body,
       }),
     }),
-    respondKeyAuth: builder.mutation<{ Nb: string }, { authSessionId: string }>(
-      {
-        query: (body) => ({
-          url: "/mutual/keyAuth/respond",
-          method: "POST",
-          body,
-        }),
-      }
-    ),
-    confirmKeyAuth: builder.mutation<
-      { Na: string; Nb: string; keyHex: string },
-      { authSessionId: string }
+    respondPeer: b.mutation<
+      { Apub: string; Bpub: string },
+      { sessionId: string; Bpub: string }
     >({
       query: (body) => ({
-        url: "/mutual/keyAuth/confirm",
+        url: "/dh/peer/respond",
+        method: "POST",
+        body,
+      }),
+    }),
+    // **nouvelle** mutation pour retrouver une session existante
+    findPeerSession: b.mutation<{ sessionId: string }, { otherId: string }>({
+      query: (body) => ({
+        url: "/dh/peer/find",
         method: "POST",
         body,
       }),
     }),
 
-    // --- Diffie‑Hellman (cas 3) ---
-    getDHParams: builder.query<{ p: string; g: string }, void>({
-      query: () => "/dh/params",
-    }),
-    dhInitiate: builder.mutation<
-      { sessionId: string; A: string },
-      { p: string; g: string }
-    >({
+    // --- Diffie–Hellman server‑assisted (Admin ↔ A/B) ---
+    dhServerGenerate: b.mutation<{ sessionId: string }, { targetId: string }>({
       query: (body) => ({
-        url: "/dh/initiate",
+        url: "/dh/server/generate",
         method: "POST",
         body,
       }),
     }),
-    dhRespond: builder.mutation<
-      { B: string },
-      { sessionId: string; p: string; g: string; B: string }
-    >({
-      query: (body) => ({
-        url: "/dh/respond",
-        method: "POST",
-        body,
-      }),
+    dhServerFetch: b.query<{ keyHex: string }, string>({
+      query: (sessionId) => `/dh/server/fetch/${sessionId}`,
+    }),
+    checkServerSession: b.query<void, string>({
+      query: (sessionId) => `/dh/server/check/${sessionId}`,
     }),
 
-    // --- Messagerie chiffrée ---
-    sendMessage: builder.mutation<{ message: string }, MessagePayload>({
+    // --- Messagerie peer‑to‑peer ---
+    sendPeerMessage: b.mutation<{ message: string }, MessagePayload>({
       query: (body) => ({
-        url: "/message/send",
+        url: "/message/peer/send",
         method: "POST",
         body,
       }),
     }),
-    getMessages: builder.query<
+    getPeerMessages: b.query<
       {
         id: number;
         sessionId: string;
@@ -152,7 +148,48 @@ export const apiSlice = createApi({
       }[],
       string
     >({
-      query: (sessionId) => `/message/${sessionId}`,
+      query: (sessionId) => `/message/peer/${sessionId}`,
+    }),
+
+    // --- Messagerie server‑assisted ---
+    sendServerMessage: b.mutation<{ message: string }, MessagePayload>({
+      query: (body) => ({
+        url: "/message/server/send",
+        method: "POST",
+        body,
+      }),
+    }),
+    getServerMessages: b.query<
+      {
+        id: number;
+        sessionId: string;
+        senderId: number;
+        ciphertext: string;
+        createdAt: string;
+      }[],
+      string
+    >({
+      query: (sessionId) => `/message/server/${sessionId}`,
+    }),
+    requestMutualAuthChallenge: b.mutation<
+      { message: string },
+      { sessionId: string }
+    >({
+      query: (body) => ({
+        url: "/mutualauth/request-challenge",
+        method: "POST",
+        body,
+      }),
+    }),
+    verifyMutualAuthChallenge: b.mutation<
+      { message: string },
+      { sessionId: string; code: string }
+    >({
+      query: (body) => ({
+        url: "/mutualauth/verify-challenge",
+        method: "POST",
+        body,
+      }),
     }),
   }),
 });
@@ -161,16 +198,26 @@ export const {
   useLoginUserMutation,
   useRegisterUserMutation,
   useVerifyOtpMutation,
-  useCase1InitiateMutation,
-  useCase1FetchQuery,
-  useCase2GenerateMutation,
-  useCase2FetchQuery,
-  useStartKeyAuthMutation,
-  useRespondKeyAuthMutation,
-  useConfirmKeyAuthMutation,
-  useGetDHParamsQuery,
-  useDhInitiateMutation,
-  useDhRespondMutation,
-  useSendMessageMutation,
-  useGetMessagesQuery,
+
+  useGetUsersQuery,
+
+  useGetDhPeerParamsQuery,
+  useGetDhPeerParamsForResponseQuery,
+  useGetPeerSessionQuery,
+  useInitiatePeerMutation,
+  useRespondPeerMutation,
+  useFindPeerSessionMutation,
+
+  useDhServerGenerateMutation,
+  useDhServerFetchQuery,
+  useLazyCheckServerSessionQuery,
+  useCheckServerSessionQuery,
+
+  useSendPeerMessageMutation,
+  useGetPeerMessagesQuery,
+  useSendServerMessageMutation,
+  useGetServerMessagesQuery,
+
+  useRequestMutualAuthChallengeMutation,
+  useVerifyMutualAuthChallengeMutation,
 } = apiSlice;

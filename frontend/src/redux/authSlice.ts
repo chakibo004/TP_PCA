@@ -3,7 +3,7 @@ import { createSlice, PayloadAction } from "@reduxjs/toolkit";
 import AlertService from "../utils/AlertService";
 
 interface AuthState {
-  user: { username: string } | null;
+  user: { id: number; username: string } | null;
   isLoggedIn: boolean;
   tokenExpiration: number | null;
   lastSync: number;
@@ -11,6 +11,7 @@ interface AuthState {
 }
 
 interface CredentialsPayload {
+  id: number;
   username: string;
   tokenExpiration: number;
 }
@@ -41,16 +42,21 @@ const authSlice = createSlice({
   reducers: {
     // Appelé après verifyOtp().unwrap()
     setCredentials: (state, action: PayloadAction<CredentialsPayload>) => {
-      const { username, tokenExpiration } = action.payload;
+      const { id, username, tokenExpiration } = action.payload;
       const timestamp = Date.now();
 
-      state.user = { username };
+      state.user = { id, username };
       state.isLoggedIn = true;
       state.tokenExpiration = tokenExpiration;
       state.lastSync = timestamp;
       state.alertShown = false;
 
-      const toStore: StoredAuthData = { username, tokenExpiration, timestamp };
+      const toStore: StoredAuthData = {
+        id,
+        username,
+        tokenExpiration,
+        timestamp,
+      };
       localStorage.setItem("authData", JSON.stringify(toStore));
     },
 
@@ -84,7 +90,7 @@ const authSlice = createSlice({
         try {
           const data: StoredAuthData = JSON.parse(raw);
           if (now < data.tokenExpiration) {
-            state.user = { username: data.username };
+            state.user = { id: data.id, username: data.username };
             state.isLoggedIn = true;
             state.tokenExpiration = data.tokenExpiration;
             state.lastSync = data.timestamp;
