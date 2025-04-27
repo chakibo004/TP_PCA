@@ -9,7 +9,7 @@ const {
   getSession,
   getParamsForResponse,
   findSession,
-  sessionsPeer, // Import P2P sessions store
+  sessionsPeer,
 } = require("../controllers/dhPeerController");
 
 // Server-Assisted Controller Functions
@@ -17,21 +17,32 @@ const {
   getServerDhParams,
   exchangeDhKeys,
   requestSessionKey,
-  serverClientDhSessions, // Import Server-Client DH sessions store
+  getSessionKey,
+  findServerSession,
+  serverClientDhSessions,
+  serverSessionKeys,
+  checkUserDhStatus,
 } = require("../controllers/dhServerController");
 
 const router = express.Router();
 
-// Vérifier qu’une session peer existe
+// Vérifier qu'une session peer existe
 router.get("/peer/check/:sessionId", authenticateToken, (req, res) => {
   const { sessionId } = req.params;
   if (!sessionsPeer[sessionId]) {
-    return res.status(404).json({ message: "Session peer inconnue" });
+    return res.status(404).json({ message: "Session introuvable" });
   }
   res.sendStatus(204);
 });
 
-// Vérifier qu’une session server‑assisted existe
+// Vérifier qu'une session server‑assisted existe
+router.get("/server/check/:sessionId", authenticateToken, (req, res) => {
+  const { sessionId } = req.params;
+  if (!serverSessionKeys[sessionId]) {
+    return res.status(404).json({ message: "Session introuvable" });
+  }
+  res.sendStatus(204);
+});
 
 // Peer‑to‑peer DH
 router.get("/peer/params", authenticateToken, getParams);
@@ -43,35 +54,21 @@ router.get(
 router.post("/peer/initiate", authenticateToken, initiate);
 router.post("/peer/respond", authenticateToken, respond);
 router.get("/peer/session/:sessionId", authenticateToken, getSession);
-// **nouvelle** route pour retrouver une session existante
 router.post("/peer/find", authenticateToken, findSession);
-router.get("/peer/check/:sessionId", authenticateToken, (req, res) => {
-  const { sessionId } = req.params;
-  if (!sessionsPeer[sessionId]) {
-    return res.status(404).json({ message: "Session peer inconnue" });
-  }
-  res.sendStatus(204); // OK, session exists
-});
 
 // --- Server-Assisted DH Routes (KDC Model) ---
-router.get("/server/params", authenticateToken, getServerDhParams); // Get p, g for server DH
-router.post("/server/exchange", authenticateToken, exchangeDhKeys); // Exchange pub keys with server
+router.get("/server/params", authenticateToken, getServerDhParams);
+router.post("/server/exchange", authenticateToken, exchangeDhKeys);
 router.post(
   "/server/request-session-key",
   authenticateToken,
-  requestSessionKey // Request E2EE session key (Ks)
+  requestSessionKey
 );
+router.get("/server/session-key/:sessionId", authenticateToken, getSessionKey);
+router.post("/server/find", authenticateToken, findServerSession);
+
 // Optional: Check if user has established DH with server
-router.get("/server/check/user/:userId", authenticateToken, (req, res) => {
-  const userIdToCheck = parseInt(req.params.userId, 10);
-  if (isNaN(userIdToCheck)) {
-    return res.status(400).json({ message: "Invalid user ID" });
-  }
-  if (serverClientDhSessions[userIdToCheck]?.sharedSecretHex) {
-    res.sendStatus(204); // OK, DH established
-  } else {
-    res.status(404).json({ message: "User DH session with server not found" });
-  }
-});
+// Ajouter cette route à vos routes existantes
+router.get('/server/check/user/:userId', authenticateToken, checkUserDhStatus);
 
 module.exports = router;

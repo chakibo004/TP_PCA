@@ -41,12 +41,24 @@ interface DhRespParams {
   Bpub?: string;
 }
 
+// New server DH interfaces
+export interface DhServerExchangePayload {
+  p: string;
+  g: string;
+  clientPub: string;
+}
+
+export interface RequestSessionKeyPayload {
+  targetId: string;
+}
+
 export const apiSlice = createApi({
   reducerPath: "api",
   baseQuery: fetchBaseQuery({
     baseUrl: "http://localhost:4000",
     credentials: "include",
   }),
+  tagTypes: ["Messages"],
   endpoints: (b) => ({
     // --- Auth classique ---
     loginUser: b.mutation<{ sessionId: string }, LoginPayload>({
@@ -74,6 +86,7 @@ export const apiSlice = createApi({
     // --- Liste des utilisateurs (contacts) ---
     getUsers: b.query<User[], void>({
       query: () => "/users",
+      refetchOnMountOrArgChange: true,
     }),
 
     // --- Diffie–Hellman peer‑to‑peer (A ↔ B) ---
@@ -106,7 +119,6 @@ export const apiSlice = createApi({
         body,
       }),
     }),
-    // **nouvelle** mutation pour retrouver une session existante
     findPeerSession: b.mutation<{ sessionId: string }, { otherId: string }>({
       query: (body) => ({
         url: "/dh/peer/find",
@@ -115,29 +127,53 @@ export const apiSlice = createApi({
       }),
     }),
 
-    // --- Diffie–Hellman server‑assisted (Admin ↔ A/B) ---
-    dhServerGenerate: b.mutation<{ sessionId: string }, { targetId: string }>({
+    // --- Diffie–Hellman server‑assisted (Server ↔ A/B) ---
+    getServerDhParams: b.query<{ p: string; g: string }, void>({
+      query: () => "/dh/server/params",
+    }),
+    exchangeDhKeys: b.mutation<{ serverPub: string }, DhServerExchangePayload>({
       query: (body) => ({
-        url: "/dh/server/generate",
+        url: "/dh/server/exchange",
         method: "POST",
         body,
       }),
     }),
-    dhServerFetch: b.query<{ keyHex: string }, string>({
-      query: (sessionId) => `/dh/server/fetch/${sessionId}`,
+    requestSessionKey: b.mutation<
+      {
+        sessionId: string;
+        encryptedSessionKey: string;
+        iv: string;
+        targetId: number;
+      },
+      RequestSessionKeyPayload
+    >({
+      query: (body) => ({
+        url: "/dh/server/request-session-key",
+        method: "POST",
+        body,
+      }),
     }),
-    checkServerSession: b.query<void, string>({
-      query: (sessionId) => `/dh/server/check/${sessionId}`,
+    getSessionKey: b.query<
+      {
+        sessionId: string;
+        encryptedSessionKey: string;
+        iv: string;
+        initiatorId?: number; // Make optional
+        targetId?: number; // Add optional targetId
+      },
+      string
+    >({
+      query: (sessionId) => `/dh/server/session-key/${sessionId}`,
+    }),
+    findServerSession: b.mutation<{ sessionId: string }, { otherId: string }>({
+      query: (body) => ({
+        url: "/dh/server/find",
+        method: "POST",
+        body,
+      }),
     }),
 
     // --- Messagerie peer‑to‑peer ---
-    sendPeerMessage: b.mutation<{ message: string }, MessagePayload>({
-      query: (body) => ({
-        url: "/message/peer/send",
-        method: "POST",
-        body,
-      }),
-    }),
     getPeerMessages: b.query<
       {
         id: number;
@@ -149,9 +185,27 @@ export const apiSlice = createApi({
       string
     >({
       query: (sessionId) => `/message/peer/${sessionId}`,
+      // Add providesTags for cache invalidation
+      providesTags: (result, error, sessionId) => [
+        { type: "PeerMessages", id: sessionId },
+        { type: "PeerMessages", id: "LIST" }, // General list tag
+      ],
+    }),
+    sendPeerMessage: b.mutation<{ message: string }, MessagePayload>({
+      query: (body) => ({
+        url: "/message/peer/send",
+        method: "POST",
+        body,
+      }),
+      // Add invalidatesTags to refresh messages after sending
+      invalidatesTags: (result, error, arg) => [
+        { type: "PeerMessages", id: arg.sessionId },
+        { type: "PeerMessages", id: "LIST" },
+      ],
     }),
 
     // --- Messagerie server‑assisted ---
+    // In the sendServerMessage mutation:
     sendServerMessage: b.mutation<{ message: string }, MessagePayload>({
       query: (body) => ({
         url: "/message/server/send",
@@ -166,6 +220,7 @@ export const apiSlice = createApi({
         senderId: number;
         ciphertext: string;
         createdAt: string;
+        isServerSession: boolean;
       }[],
       string
     >({
@@ -208,10 +263,11 @@ export const {
   useRespondPeerMutation,
   useFindPeerSessionMutation,
 
-  useDhServerGenerateMutation,
-  useDhServerFetchQuery,
-  useLazyCheckServerSessionQuery,
-  useCheckServerSessionQuery,
+  useGetServerDhParamsQuery,
+  useExchangeDhKeysMutation,
+  useRequestSessionKeyMutation,
+  useGetSessionKeyQuery,
+  useFindServerSessionMutation,
 
   useSendPeerMessageMutation,
   useGetPeerMessagesQuery,

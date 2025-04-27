@@ -1,321 +1,434 @@
+// controllers/dhServerController.js
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
-const { users } = require("./authController"); // To find Bob's socket
 
-// --- DH Parameters (Keep consistent with peer controller or use separate ones) ---
-// Using pre-computed MODP group 14 (2048-bit) parameters for simplicity
-// --- DH Parameters (Keep consistent with peer controller or use separate ones) ---
-// Using pre-computed MODP group 14 (2048-bit) parameters for simplicity
-const p_hex =
-  "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1" +
-  "29024E088A67CC74020BBEA63B139B22514A08798E3404DD" +
-  "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245" +
-  "E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED" +
-  "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3D" +
-  "C2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F" +
-  "83655D23DCA3AD961C62F356208552BB9ED529077096966D" +
-  "670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B" +
-  "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9" +
-  "DE2BCBF6955817183995497CEA956AE515D2261898FA0510" +
-  "15728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64" +
-  "ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7" +
-  "ABF5AE8CDB0933D71E8C94E04A25619DCEF135F0F82D8E03" +
-  "85E7D7AB85C1ACAA3EDF058D04FE5E166D91A34B95F7336B" +
-  "EBAFBC4EDDB70273E0988EA67BC3BEE391737EA6F4D89473" +
-  "5B48617C5F5CED7989DF487C83F22A0F2198A9427E8777CE" +
-  "6894F04061A91313583A4F456AD8405681B31E71F9481113" +
-  "494F655C3EC1A649E49C737301845FD7B54996D4F53B45DB" +
-  "64901E037D5A8FF6A9F31A3B5E43FFA05B";
-
-// Fix: Convert hex strings to actual buffers properly
-const p = Buffer.from(p_hex, "hex");
-// Fix: Use a number for g instead of a Buffer since it's a small value
-const g = 2; // Using the number 2 directly instead of Buffer.from(g_hex, "hex")
-
-// In-memory store for DH state between server and clients
-// Structure: { userId: { sharedSecretHex, keyHex, ivHex, createdAt } }
+// Store for server-client DH sessions
+// serverClientDhSessions[userId] = { p, g, serverPrivKey, clientPub, sharedSecret }
 const serverClientDhSessions = {};
 
-// --- Helper to derive AES key and IV from shared secret ---
-const deriveKeysFromSecret = (sharedSecretHex) => {
-  const hash = crypto
-    .createHash("sha512")
-    .update(Buffer.from(sharedSecretHex, "hex"))
-    .digest("hex");
-  const keyHex = hash.slice(0, 64); // 256 bits for AES key
-  const ivHex = hash.slice(64, 96); // 128 bits for IV
-  return { keyHex, ivHex };
-};
+// Store for shared session keys between users
+// serverSessionKeys[sessionId] = { initiator, target, sessionKey, iv, timestamp }
+const serverSessionKeys = {};
 
-// --- Helper for AES Encryption (CBC with PKCS7 padding) ---
-const encryptAES = (plaintextUtf8, keyHex, ivHex) => {
-  try {
-    const key = Buffer.from(keyHex, "hex");
-    const iv = Buffer.from(ivHex, "hex");
-    const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
-    let encrypted = cipher.update(plaintextUtf8, "utf8");
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
-    return encrypted.toString("base64");
-  } catch (error) {
-    console.error("AES Encryption failed:", error.message);
-    return null;
-  }
-};
-
-// --- Helper for AES Decryption (CBC with PKCS7 padding) ---
-// Note: Decryption might only be needed on the client-side in this KDC model
-const decryptAES = (ciphertextB64, keyHex, ivHex) => {
-  try {
-    const key = Buffer.from(keyHex, "hex");
-    const iv = Buffer.from(ivHex, "hex");
-    const ciphertext = Buffer.from(ciphertextB64, "base64");
-    const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
-    let decrypted = decipher.update(ciphertext);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    // Basic unpadding (PKCS7) - Consider a library for robustness
-    const padding = decrypted[decrypted.length - 1];
-    if (padding > 16 || padding === 0) {
-      console.warn("Potential invalid padding detected during decryption.");
-    } else {
-      let validPadding = true;
-      for (let i = 0; i < padding; i++) {
-        if (decrypted[decrypted.length - 1 - i] !== padding) {
-          validPadding = false;
-          break;
-        }
-      }
-      if (validPadding) {
-        decrypted = decrypted.slice(0, decrypted.length - padding);
-      } else {
-        console.warn("Invalid PKCS7 padding detected.");
-      }
-    }
-    return decrypted.toString("utf8");
-  } catch (error) {
-    console.error("AES Decryption failed:", error.message);
-    return null; // Indicate decryption failure
-  }
+// Utility function to safely log cryptographic values
+const safeLogKey = (key, length = 8) => {
+  if (!key) return "undefined";
+  return key.substring(0, length) + "...[tronqué]";
 };
 
 /**
- * @description Provide DH parameters (p, g) to the client
- * @route GET /api/dh/server/params
- * @access Private
+ * GET /auth/dh/server/params
+ * Returns DH parameters (p, g) for initiating DH with server
  */
 const getServerDhParams = (req, res) => {
-  res.json({ p: p_hex, g: g_hex });
+  const userId = req.user.userId;
+  console.log(`[SERVER-DH] 🔑 USER ${userId} a demandé des paramètres DH`);
+
+  const dh = crypto.getDiffieHellman("modp14");
+  dh.generateKeys();
+
+  const p = dh.getPrime("hex");
+  const g = dh.getGenerator("hex");
+
+  console.log(`[SERVER-DH] 📤 Paramètres générés pour USER ${userId}:`);
+  console.log(`[SERVER-DH]    - p: ${safeLogKey(p, 16)}`);
+  console.log(`[SERVER-DH]    - g: ${g}`);
+
+  res.json({ p, g });
 };
+
 /**
- * @description Client sends its public key, server calculates shared secret
- * @route POST /api/dh/server/exchange
- * @access Private
+ * POST /auth/dh/server/exchange
+ * Client sends their public key, server generates and returns its public key
+ * Creates shared secret between server and client
  */
 const exchangeDhKeys = (req, res) => {
-  // Fix for undefined userId - add safeguard
-  const userId = req.user?.id;
+  const { p, g, clientPub } = req.body;
+  const userId = req.user.userId;
 
-  console.log(`🔄 DH Key Exchange requested by User ${userId || "unknown"}`);
-  console.log(`🔍 req.user object:`, req.user); // Debug the entire user object
+  console.log(`[SERVER-DH] 📥 USER ${userId} a envoyé sa clé publique DH`);
+  console.log(`[SERVER-DH]    - clientPub: ${safeLogKey(clientPub)}`);
 
-  if (!userId) {
-    console.error(`❌ Authentication error: No user ID in request`);
-    return res
-      .status(401)
-      .json({ message: "Authentication failed: No user ID found" });
-  }
-
-  const { clientPubHex } = req.body; // Client's public key (A or B)
-
-  if (!clientPubHex) {
-    console.error(`❌ [User ${userId}] Missing client public key in request`);
-    return res.status(400).json({ message: "Client public key is required" });
+  if (!p || !g || !clientPub) {
+    console.log(`[SERVER-DH] ❌ Paramètres manquants de USER ${userId}`);
+    return res.status(400).json({ message: "Paramètres DH manquants" });
   }
 
   try {
-    console.log(`🔑 [User ${userId}] Generating server DH parameters`);
+    console.log(
+      `[SERVER-DH] 🔄 Génération de paire de clés pour le serveur...`
+    );
+    // Generate server key pair
+    const dh = crypto.createDiffieHellman(
+      Buffer.from(p, "hex"),
+      Buffer.from(g, "hex")
+    );
+    dh.generateKeys();
 
-    // 1. Server generates its ephemeral key pair for this exchange
-    // Fix: Create DH instance AND explicitly generate key pair
-    const serverDH = crypto.createDiffieHellman(p, g);
-    serverDH.generateKeys(); // <-- This was missing! Need to explicitly generate keys
-
-    const serverPubHex = serverDH.getPublicKey("hex");
+    const serverPub = dh.getPublicKey().toString("hex");
+    const serverPrivKey = dh.getPrivateKey().toString("hex");
 
     console.log(
-      `✅ [User ${userId}] Generated server public key: ${serverPubHex.substring(
-        0,
-        10
-      )}...`
+      `[SERVER-DH]    - Clé privée serveur: ${safeLogKey(serverPrivKey)}`
     );
-
-    // 2. Server computes the shared secret
     console.log(
-      `🔐 [User ${userId}] Computing shared secret with client public key: ${clientPubHex.substring(
-        0,
-        10
-      )}...`
+      `[SERVER-DH]    - Clé publique serveur: ${safeLogKey(serverPub)}`
     );
-    const sharedSecret = serverDH.computeSecret(
-      Buffer.from(clientPubHex, "hex")
-    );
-    const sharedSecretHex = sharedSecret.toString("hex");
+
+    // Compute shared secret
     console.log(
-      `✅ [User ${userId}] Computed shared secret: ${sharedSecretHex.substring(
-        0,
-        10
-      )}...`
+      `[SERVER-DH] 🔐 Calcul du secret partagé pour USER ${userId}...`
     );
+    const sharedSecret = dh
+      .computeSecret(Buffer.from(clientPub, "hex"))
+      .toString("hex");
 
-    // 3. Derive AES keys
-    console.log(`🔑 [User ${userId}] Deriving AES keys from shared secret`);
-    const { keyHex, ivHex } = deriveKeysFromSecret(sharedSecretHex);
+    console.log(`[SERVER-DH]    - Secret partagé: ${safeLogKey(sharedSecret)}`);
 
-    // 4. Store the shared secret and derived keys for this user
+    // Store session info
     serverClientDhSessions[userId] = {
-      sharedSecretHex, // Store the secret
-      keyHex, // Store derived key
-      ivHex, // Store derived IV
-      createdAt: new Date(),
+      p,
+      g,
+      serverPrivKey,
+      clientPub,
+      serverPub,
+      sharedSecret,
+      timestamp: Date.now(),
     };
 
+    console.log(`[SERVER-DH] ✅ Échange DH réussi avec USER ${userId}`);
     console.log(
-      `✅ [User ${userId}] DH shared secret established and stored: ${sharedSecretHex.substring(
-        0,
-        10
-      )}...`
+      `[SERVER-DH]    - Session stockée: serverClientDhSessions[${userId}]`
     );
-    console.log(`  Derived Key: ${keyHex.substring(0, 10)}...`);
-    console.log(`  Derived IV: ${ivHex.substring(0, 10)}...`);
 
-    // 5. Send Server's public key back to the client
-    console.log(`📤 [User ${userId}] Sending server public key back to client`);
-    res.json({ serverPubHex });
+    res.json({
+      serverPub,
+    });
   } catch (error) {
-    console.error(`❌ [User ${userId}] DH key exchange error:`, error);
-    res.status(500).json({ message: "DH key exchange failed" });
+    console.error(
+      `[SERVER-DH] 🚨 Erreur lors de l'échange DH avec USER ${userId}:`,
+      error
+    );
+    res.status(500).json({ message: "Erreur lors de l'échange DH" });
   }
 };
-// The rest of your code remains unchanged...
 
 /**
- * @description KDC Function: Generate session key (Ks) and distribute securely
- * @route POST /api/dh/server/request-session-key
- * @access Private
+ * POST /auth/dh/server/request-session-key
+ * Client requests a session key for communication with another user
+ * Server generates a random key and encrypts it for initiator
+ * The key will be stored for the target to retrieve later when they establish DH
  */
 const requestSessionKey = async (req, res) => {
-  const initiatorId = req.user.id;
   const { targetId } = req.body;
+  const initiatorId = req.user.userId;
+
+  console.log(
+    `[SERVER-KEY] 🔑 USER ${initiatorId} demande une clé de session avec USER ${targetId}`
+  );
 
   if (!targetId) {
-    return res.status(400).json({ message: "Target ID is required" });
-  }
-  const targetIdNum = parseInt(targetId, 10);
-  if (isNaN(targetIdNum) || initiatorId === targetIdNum) {
-    return res.status(400).json({ message: "Invalid Target ID" });
+    console.log(
+      `[SERVER-KEY] ❌ ID cible manquant dans la requête de USER ${initiatorId}`
+    );
+    return res.status(400).json({ message: "ID utilisateur cible manquant" });
   }
 
-  // 1. Check if DH sessions exist for both users with the server
-  const initiatorDhSession = serverClientDhSessions[initiatorId];
-  const targetDhSession = serverClientDhSessions[targetIdNum];
-
-  if (!initiatorDhSession || !initiatorDhSession.keyHex) {
-    return res
-      .status(400)
-      .json({ message: "Initiator DH session not established with server" });
-  }
-  if (!targetDhSession || !targetDhSession.keyHex) {
-    // Handle offline target or target who hasn't done DH exchange
-    return res
-      .status(400)
-      .json({ message: "Target DH session not established with server" });
+  // Check if initiator has established DH with server
+  if (!serverClientDhSessions[initiatorId]) {
+    console.log(
+      `[SERVER-KEY] ⚠️ USER ${initiatorId} n'a pas établi de session DH avec le serveur`
+    );
+    return res.status(400).json({
+      message: "Vous devez d'abord établir une session DH avec le serveur",
+    });
   }
 
   try {
-    // 2. Generate the new symmetric session key (Ks)
-    const sessionKeyKs = crypto.randomBytes(32); // 256-bit AES key
-    const sessionKeyKsHex = sessionKeyKs.toString("hex");
-    const sessionId = uuidv4(); // Unique ID for this specific chat session
-
     console.log(
-      `Generated Session Key (Ks) ${sessionId} for ${initiatorId}<->${targetIdNum}: ${sessionKeyKsHex.substring(
-        0,
-        10
-      )}...`
+      `[SERVER-KEY] 🔄 Génération d'une clé de session pour USER ${initiatorId} -> USER ${targetId}...`
+    );
+    // Generate a random session key (256 bits / 32 bytes for AES-256)
+    const sessionKey = crypto.randomBytes(32).toString("hex");
+    console.log(
+      `[SERVER-KEY]    - Clé de session générée: ${safeLogKey(sessionKey)}`
     );
 
-    // 3. Encrypt Ks for Initiator (A) using S_AS keys
-    const packageForA = {
-      sessionId,
-      sessionKey: sessionKeyKsHex,
-      peerId: targetIdNum, // Let A know who this key is for
+    // Generate a random IV (16 bytes for AES)
+    const iv = crypto.randomBytes(16).toString("hex");
+    console.log(`[SERVER-KEY]    - IV généré: ${safeLogKey(iv)}`);
+
+    // Generate a unique session ID
+    const sessionId = uuidv4();
+    console.log(`[SERVER-KEY]    - ID de session: ${sessionId}`);
+
+    // Get shared secret for initiator
+    const initiatorSecret = serverClientDhSessions[initiatorId].sharedSecret;
+    console.log(
+      `[SERVER-KEY]    - Secret partagé avec initiateur: ${safeLogKey(
+        initiatorSecret
+      )}`
+    );
+
+    // Encrypt session key for initiator
+    console.log(
+      `[SERVER-KEY] 🔒 Chiffrement de la clé de session pour USER ${initiatorId}...`
+    );
+    const initiatorCipher = crypto.createCipheriv(
+      "aes-256-cbc",
+      Buffer.from(initiatorSecret.substring(0, 64), "hex").slice(0, 32),
+      Buffer.from(iv, "hex")
+    );
+    let encryptedKeyForInitiator = initiatorCipher.update(
+      sessionKey,
+      "hex",
+      "hex"
+    );
+    encryptedKeyForInitiator += initiatorCipher.final("hex");
+    console.log(
+      `[SERVER-KEY]    - Clé chiffrée pour initiateur: ${safeLogKey(
+        encryptedKeyForInitiator
+      )}`
+    );
+
+    // Store session key info - even if target hasn't established DH yet
+    serverSessionKeys[sessionId] = {
+      initiator: initiatorId,
+      target: parseInt(targetId),
+      sessionKey,
+      iv,
+      timestamp: Date.now(),
     };
-    const encryptedKsForA = encryptAES(
-      JSON.stringify(packageForA),
-      initiatorDhSession.keyHex,
-      initiatorDhSession.ivHex
-    );
-    if (!encryptedKsForA)
-      throw new Error("Failed to encrypt key for initiator");
 
-    // 4. Encrypt Ks for Target (B) using S_BS keys
-    const packageForB = {
+    console.log(`[SERVER-KEY] ✅ Clé de session stockée avec succès`);
+    console.log(`[SERVER-KEY]    - sessionId: ${sessionId}`);
+    console.log(`[SERVER-KEY]    - initiator: ${initiatorId}`);
+    console.log(`[SERVER-KEY]    - target: ${targetId}`);
+
+    // Get the io instance from the app
+    const io = req.app.get("io");
+
+    // Notify target user of new session availability (if they're online)
+    console.log(
+      `[SERVER-KEY] 📣 Notification envoyée à USER ${targetId} pour la nouvelle session ${sessionId}`
+    );
+    io.to(`user:${targetId}`).emit("server-session-available", {
       sessionId,
-      sessionKey: sessionKeyKsHex,
-      peerId: initiatorId, // Let B know who this key is from
-    };
-    const encryptedKsForB = encryptAES(
-      JSON.stringify(packageForB),
-      targetDhSession.keyHex,
-      targetDhSession.ivHex
-    );
-    if (!encryptedKsForB) throw new Error("Failed to encrypt key for target");
-
-    // 5. Send encrypted Ks to Initiator (A) via HTTP response
-    res.status(201).json({
-      message: "Session key generated. Sending encrypted key.",
-      sessionId, // Send the session ID in plaintext
-      encryptedKeyPackage: encryptedKsForA, // Send A their encrypted package
+      initiatorId,
     });
 
-    // 6. Send encrypted Ks to Target (B) via WebSocket
-    const io = req.app.get("io"); // Get io instance from app
-    // **Important**: Ensure 'users' object in authController is correctly populated with socketId
-    const targetUser = users[targetIdNum]; // Get user object which should contain socketId
-    const targetSocketId = targetUser?.socketId;
-
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("session-key-offer", {
-        // Use a specific event name
-        sessionId,
-        encryptedKeyPackage: encryptedKsForB, // Send B their encrypted package
-      });
-      console.log(
-        `Sent encrypted session key package to target ${targetIdNum} via socket ${targetSocketId}`
-      );
-    } else {
-      console.warn(
-        `Target user ${targetIdNum} is offline. Cannot deliver session key package via socket.`
-      );
-      // How to handle this?
-      // - Fail the request?
-      // - Let initiator know target is offline?
-      // - Store the package and deliver when B connects? (More complex)
-      // For now, the initiator gets their key, but the target doesn't.
-    }
-
-    // Note: The server does NOT store Ks. It only uses S_AS and S_BS to transport Ks.
+    res.json({
+      sessionId,
+      encryptedSessionKey: encryptedKeyForInitiator,
+      iv,
+      targetId: parseInt(targetId),
+    });
   } catch (error) {
-    console.error("Error requesting session key:", error);
-    res.status(500).json({ message: "Server error generating session key" });
+    console.error(
+      `[SERVER-KEY] 🚨 Erreur lors de la génération de clé pour USER ${initiatorId} et USER ${targetId}:`,
+      error
+    );
+    res
+      .status(500)
+      .json({ message: "Erreur lors de la génération de la clé de session" });
   }
+};
+
+/**
+ * GET /auth/dh/server/get-session-key/:sessionId
+ * Target user retrieves their encrypted session key
+ * This requires that the target has now established DH with the server
+ */
+const getSessionKey = (req, res) => {
+  const { sessionId } = req.params;
+  const userId = req.user.userId;
+
+  console.log(
+    `[SERVER-KEY] 🔍 USER ${userId} demande la clé pour la session ${sessionId}`
+  );
+
+  if (!serverSessionKeys[sessionId]) {
+    console.log(
+      `[SERVER-KEY] ❌ Session ${sessionId} introuvable pour USER ${userId}`
+    );
+    return res.status(404).json({ message: "Session introuvable" });
+  }
+
+  const session = serverSessionKeys[sessionId];
+  console.log(
+    `[SERVER-KEY]    - Session trouvée: initiateur=${session.initiator}, cible=${session.target}`
+  );
+
+  // Verify user is part of this session
+  if (session.target !== userId && session.initiator !== userId) {
+    console.log(
+      `[SERVER-KEY] ⛔ USER ${userId} n'est pas autorisé pour la session ${sessionId}`
+    );
+    return res.status(403).json({ message: "Non autorisé pour cette session" });
+  }
+
+  const userRole = userId === session.initiator ? "initiateur" : "cible";
+  console.log(
+    `[SERVER-KEY]    - USER ${userId} est ${userRole} dans cette session`
+  );
+
+  // Check if the user has established DH with server
+  if (!serverClientDhSessions[userId]) {
+    console.log(
+      `[SERVER-KEY] ⚠️ USER ${userId} n'a pas établi de session DH avec le serveur`
+    );
+    return res.status(400).json({
+      message: "Vous devez d'abord établir une session DH avec le serveur",
+    });
+  }
+
+  try {
+    // Get the user's shared secret with server
+    const userSecret = serverClientDhSessions[userId].sharedSecret;
+    console.log(
+      `[SERVER-KEY]    - Secret partagé de USER ${userId} avec serveur: ${safeLogKey(
+        userSecret
+      )}`
+    );
+
+    // Encrypt session key for this user
+    console.log(
+      `[SERVER-KEY] 🔒 Chiffrement de la clé de session pour USER ${userId}...`
+    );
+    const userCipher = crypto.createCipheriv(
+      "aes-256-cbc",
+      Buffer.from(userSecret.substring(0, 64), "hex").slice(0, 32),
+      Buffer.from(session.iv, "hex")
+    );
+    let encryptedKey = userCipher.update(session.sessionKey, "hex", "hex");
+    encryptedKey += userCipher.final("hex");
+    console.log(
+      `[SERVER-KEY]    - Clé de session chiffrée: ${safeLogKey(encryptedKey)}`
+    );
+
+    console.log(
+      `[SERVER-KEY] ✅ Clé de session envoyée à USER ${userId} pour session ${sessionId}`
+    );
+
+    // Return response based on user's role in the session
+    if (userId === session.initiator) {
+      return res.json({
+        sessionId,
+        encryptedSessionKey: encryptedKey,
+        iv: session.iv,
+        targetId: session.target,
+      });
+    } else {
+      return res.json({
+        sessionId,
+        encryptedSessionKey: encryptedKey,
+        iv: session.iv,
+        initiatorId: session.initiator,
+      });
+    }
+  } catch (error) {
+    console.error(
+      `[SERVER-KEY] 🚨 Erreur lors de la récupération de clé pour USER ${userId}:`,
+      error
+    );
+    return res
+      .status(500)
+      .json({ message: "Erreur lors de la récupération de la clé de session" });
+  }
+};
+
+/**
+ * POST /auth/dh/server/find-session
+ * Find existing session between two users
+ */
+const findServerSession = (req, res) => {
+  const { otherId } = req.body;
+  const userId = req.user.userId;
+
+  console.log(
+    `[SERVER-KEY] 🔍 USER ${userId} recherche une session avec USER ${otherId}`
+  );
+
+  if (!otherId) {
+    console.log(
+      `[SERVER-KEY] ❌ ID cible manquant dans la requête de USER ${userId}`
+    );
+    return res.status(400).json({ message: "ID utilisateur cible manquant" });
+  }
+
+  // Find session where the current user and the other user are participants
+  const sessionId = Object.keys(serverSessionKeys).find((id) => {
+    const session = serverSessionKeys[id];
+    return (
+      (session.initiator === userId && session.target === Number(otherId)) ||
+      (session.initiator === Number(otherId) && session.target === userId)
+    );
+  });
+
+  if (sessionId) {
+    const session = serverSessionKeys[sessionId];
+    console.log(
+      `[SERVER-KEY] ✅ Session ${sessionId} trouvée entre USER ${userId} et USER ${otherId}`
+    );
+    console.log(
+      `[SERVER-KEY]    - Initiateur: ${session.initiator}, Cible: ${session.target}`
+    );
+    console.log(
+      `[SERVER-KEY]    - Date de création: ${new Date(
+        session.timestamp
+      ).toLocaleString()}`
+    );
+    return res.json({ sessionId });
+  } else {
+    console.log(
+      `[SERVER-KEY] ❌ Aucune session trouvée entre USER ${userId} et USER ${otherId}`
+    );
+    return res.status(404).json({ message: "Aucune session trouvée" });
+  }
+};
+
+/**
+ * GET /auth/dh/server/check/user/:userId
+ * Check if a user has established DH with server
+ * This endpoint is for informational purposes only
+ */
+const checkUserDhStatus = (req, res) => {
+  const { userId } = req.params;
+  const requesterId = req.user.userId;
+
+  console.log(
+    `[SERVER-DH] 🔍 USER ${requesterId} vérifie le statut DH de USER ${userId}`
+  );
+
+  const hasEstablishedDh = !!serverClientDhSessions[userId];
+
+  if (hasEstablishedDh) {
+    const dhSession = serverClientDhSessions[userId];
+    console.log(
+      `[SERVER-DH] ✅ USER ${userId} a établi DH le ${new Date(
+        dhSession.timestamp
+      ).toLocaleString()}`
+    );
+  } else {
+    console.log(`[SERVER-DH] ❌ USER ${userId} n'a pas établi de session DH`);
+  }
+
+  return res.json({
+    userId: parseInt(userId),
+    hasEstablishedDh,
+    timestamp: hasEstablishedDh
+      ? serverClientDhSessions[userId].timestamp
+      : null,
+  });
 };
 
 module.exports = {
   getServerDhParams,
   exchangeDhKeys,
   requestSessionKey,
-  serverClientDhSessions, // Export for potential use elsewhere (e.g., checking)
-  deriveKeysFromSecret, // Export helper if needed
-  encryptAES, // Export helper if needed
-  decryptAES, // Export helper if needed
+  getSessionKey,
+  findServerSession,
+  checkUserDhStatus,
+  serverClientDhSessions,
+  serverSessionKeys,
 };
